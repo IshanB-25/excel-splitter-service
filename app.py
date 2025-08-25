@@ -135,10 +135,22 @@ def split_excel_by_sheets_simple(
             if len(source_wb.sheetnames) > MAX_SHEETS:
                 return {}, f"File contains too many sheets ({len(source_wb.sheetnames)}). Maximum allowed: {MAX_SHEETS}"
             
-            logger.info(f"Processing {len(source_wb.sheetnames)} sheets from {original_filename}")
-            
-            # Process each sheet
+            # Filter out hidden sheets
+            visible_sheets = []
+            hidden_sheets = []
             for sheet_name in source_wb.sheetnames:
+                sheet = source_wb[sheet_name]
+                if sheet.sheet_state == 'visible':
+                    visible_sheets.append(sheet_name)
+                else:
+                    hidden_sheets.append(sheet_name)
+            
+            logger.info(f"Processing {len(visible_sheets)} visible sheets from {original_filename}")
+            if hidden_sheets:
+                logger.info(f"Skipping {len(hidden_sheets)} hidden sheets: {', '.join(hidden_sheets)}")
+            
+            # Process each visible sheet
+            for sheet_name in visible_sheets:
                 try:
                     logger.info(f"Processing sheet: {sheet_name}")
                     source_ws = source_wb[sheet_name]
