@@ -1,4 +1,5 @@
 import gc
+import csv
 import logging
 import os
 import re
@@ -62,13 +63,40 @@ def _write_sheet_as_workbook(source_ws, sheet_name: str, output_path: str) -> No
     """
     Write one worksheet into a new workbook.
 
-    This intentionally copies only cell values/formulas for speed and low memory.
+    This intentionally skips style formatting but preserves worksheet structure.
     """
-    output_wb = Workbook(write_only=True)
+    output_wb = Workbook(write_only=False)
     try:
+        output_wb.remove(output_wb.active)
         target_ws = output_wb.create_sheet(title=sheet_name)
-        for row in source_ws.iter_rows(values_only=True):
-            target_ws.append(row)
+
+        # Preserve worksheet structure (without cell formatting styles).
+        target_ws.freeze_panes = source_ws.freeze_panes
+        if source_ws.auto_filter and source_ws.auto_filter.ref:
+            target_ws.auto_filter.ref = source_ws.auto_filter.ref
+
+        for col_letter, col_dim in source_ws.column_dimensions.items():
+            target_dim = target_ws.column_dimensions[col_letter]
+            target_dim.width = col_dim.width
+            target_dim.hidden = col_dim.hidden
+            target_dim.outlineLevel = col_dim.outlineLevel
+            target_dim.collapsed = col_dim.collapsed
+
+        for row_idx, row_dim in source_ws.row_dimensions.items():
+            target_dim = target_ws.row_dimensions[row_idx]
+            target_dim.height = row_dim.height
+            target_dim.hidden = row_dim.hidden
+            target_dim.outlineLevel = row_dim.outlineLevel
+            target_dim.collapsed = row_dim.collapsed
+
+        for merged_range in source_ws.merged_cells.ranges:
+            target_ws.merge_cells(str(merged_range))
+
+        for row in source_ws.iter_rows():
+            for cell in row:
+                if cell.value is not None:
+                    target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+
         output_wb.save(output_path)
     finally:
         try:
@@ -77,11 +105,45 @@ def _write_sheet_as_workbook(source_ws, sheet_name: str, output_path: str) -> No
             pass
 
 
+def _write_sheet_as_txt(source_ws, sheet_name: str, output_path: str) -> None:
+    """
+    Write worksheet to tab-separated text while keeping grid structure.
+    
+    The top comment lines include structural metadata such as merged ranges.
+    """
+    max_row = source_ws.max_row or 0
+    max_col = source_ws.max_column or 0
+    merged_ranges = ",".join(str(r) for r in source_ws.merged_cells.ranges)
+
+    with open(output_path, "w", encoding="utf-8", newline="") as txt_file:
+        txt_file.write(f"# sheet_name\t{sheet_name}\n")
+        txt_file.write(f"# max_row\t{max_row}\n")
+        txt_file.write(f"# max_col\t{max_col}\n")
+        txt_file.write(f"# merged_ranges\t{merged_ranges}\n")
+
+        writer = csv.writer(
+            txt_file,
+            delimiter="\t",
+            lineterminator="\n",
+            quoting=csv.QUOTE_MINIMAL,
+        )
+        if max_row > 0 and max_col > 0:
+            for row in source_ws.iter_rows(
+                min_row=1,
+                max_row=max_row,
+                min_col=1,
+                max_col=max_col,
+                values_only=True,
+            ):
+                writer.writerow(["" if value is None else value for value in row])
+
+
 @timing_decorator
 def split_excel_by_sheets_simple(
     uploaded_stream,
     original_filename: str,
     temp_dir: str,
+    output_format: str = "xlsx",
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
     Split workbook into one workbook per visible sheet.
@@ -96,7 +158,7 @@ def split_excel_by_sheets_simple(
         try:
             source_wb = load_workbook(
                 uploaded_stream,
-                read_only=True,
+                read_only=False,
                 data_only=False,
                 keep_links=False,
             )
@@ -132,9 +194,12 @@ def split_excel_by_sheets_simple(
             try:
                 logger.info("Processing sheet: %s", sheet_name)
                 source_ws = source_wb[sheet_name]
-                output_filename = f"{base_name}_{sanitize_filename(sheet_name)}.xlsx"
+                output_filename = f"{base_name}_{sanitize_filename(sheet_name)}.{output_format}"
                 output_path = os.path.join(temp_dir, output_filename)
-                _write_sheet_as_workbook(source_ws, sheet_name, output_path)
+                if output_format == "txt":
+                    _write_sheet_as_txt(source_ws, sheet_name, output_path)
+                else:
+                    _write_sheet_as_workbook(source_ws, sheet_name, output_path)
                 generated_paths.append(output_path)
             except Exception as e:
                 logger.error("Error processing sheet '%s': %s", sheet_name, e)
@@ -147,9 +212,14 @@ def split_excel_by_sheets_simple(
 
         if len(generated_paths) == 1:
             one_file = generated_paths[0]
+            mime_type = (
+                "text/plain"
+                if output_format == "txt"
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
             return (
                 one_file,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime_type,
                 os.path.basename(one_file),
                 None,
             )
@@ -182,14 +252,14 @@ def index():
         {
             "service": "Excel File Splitter",
             "version": "2.2.0",
-            "description": "Split Excel files by visible sheets with low-memory processing",
+            "description": "Split Excel files by visible sheets while preserving structure",
             "endpoints": {
                 "POST /split-excel": "Upload Excel file to split",
                 "GET /health": "Health check endpoint",
                 "GET /": "Service information",
             },
             "features": [
-                "Low-memory sheet splitting",
+                "Sheet structure preservation (no cell styling)",
                 "Skips hidden sheets",
                 "Preserves cell values and formulas",
                 "Single-sheet direct response or multi-sheet ZIP",
@@ -198,6 +268,7 @@ def index():
                 "max_file_size": f"{MAX_FILE_SIZE / (1024 * 1024):.1f} MB",
                 "max_sheets": MAX_SHEETS,
                 "allowed_extensions": list(ALLOWED_EXTENSIONS),
+                "output_formats": ["xlsx", "txt"],
             },
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -242,16 +313,30 @@ def split_excel():
                 400,
             )
 
+        output_format = (
+            request.args.get("format")
+            or request.form.get("format")
+            or "xlsx"
+        ).strip().lower()
+        if output_format not in {"xlsx", "txt"}:
+            return jsonify({"error": "Invalid format. Allowed formats: xlsx, txt"}), 400
+
         file.seek(0, os.SEEK_END)
         upload_size = file.tell()
         file.seek(0)
-        logger.info("Received file: %s (%.2f MB)", file.filename, upload_size / (1024 * 1024))
+        logger.info(
+            "Received file: %s (%.2f MB), output_format=%s",
+            file.filename,
+            upload_size / (1024 * 1024),
+            output_format,
+        )
 
         temp_dir_ctx = tempfile.TemporaryDirectory(prefix="excel-split-")
         response_path, mime_type, download_name, error = split_excel_by_sheets_simple(
             file.stream,
             file.filename,
             temp_dir_ctx.name,
+            output_format,
         )
 
         if error:

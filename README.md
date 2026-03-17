@@ -4,10 +4,11 @@ A production-ready Flask web service that splits multi-sheet Excel files into in
 
 ## 🚀 Features
 
-- **Sheet Separation**: Automatically splits Excel files with multiple sheets into individual `.xlsx` files
-- **Smart Response**: Returns a single `.xlsx` file for single-sheet workbooks, or a `.zip` file for multiple sheets
-- **Low-Memory Splitting**: Streams sheet data with minimal RAM overhead per request
-- **Memory Efficient**: Processes files entirely in memory without temporary file storage
+- **Sheet Separation**: Automatically splits Excel files with multiple sheets into individual files per sheet
+- **Smart Response**: Returns a single file for one visible sheet, or a `.zip` for multiple sheets
+- **Structure Preservation (XLSX mode)**: Keeps merged ranges, row heights, column widths, sheet names, and formulas (without style formatting)
+- **Optional TXT Output**: Export each sheet as tab-separated `.txt` while retaining grid layout and metadata
+- **Memory Conscious**: Uses temporary files during processing to reduce peak memory pressure
 - **Production Ready**: Includes health checks, comprehensive error handling, and detailed logging
 - **Docker Support**: Fully containerized with Gunicorn for production deployment
 
@@ -73,14 +74,18 @@ Upload an Excel file to split into individual sheets.
 - Method: `POST`
 - Content-Type: `multipart/form-data`
 - Field name: `file`
+- Optional query/form parameter: `format` (`xlsx` default, `txt` optional)
 
 **Response:**
-- Single sheet: Returns `.xlsx` file directly
-- Multiple sheets: Returns `.zip` file containing all split files
+- Single sheet: Returns `.xlsx` or `.txt` directly (based on `format`)
+- Multiple sheets: Returns `.zip` containing one file per sheet
 
 **Example using curl:**
 ```bash
 curl -X POST -F "file=@your-excel-file.xlsx" http://localhost:3070/split-excel -o output.zip
+
+# Optional TXT mode
+curl -X POST -F "file=@your-excel-file.xlsx" "http://localhost:3070/split-excel?format=txt" -o output.zip
 ```
 
 **Example using Python:**
@@ -115,10 +120,10 @@ Service information and configuration details.
 ```json
 {
   "service": "Excel File Splitter",
-  "version": "2.1.0",
-  "description": "Split Excel files by sheets while preserving data and structure",
+  "version": "2.2.0",
+  "description": "Split Excel files by visible sheets while preserving structure",
   "features": [
-    "Low-memory sheet splitting",
+    "Sheet structure preservation (no cell styling)",
     "Skips hidden sheets",
     "Preserves cell values and formulas",
     "Single-sheet direct response or multi-sheet ZIP"
@@ -126,7 +131,8 @@ Service information and configuration details.
   "configuration": {
     "max_file_size": "50.0 MB",
     "max_sheets": 100,
-    "allowed_extensions": ["xlsx", "xls", "xlsm", "xlsb"]
+    "allowed_extensions": ["xlsx", "xls", "xlsm", "xlsb"],
+    "output_formats": ["xlsx", "txt"]
   }
 }
 ```
@@ -215,17 +221,29 @@ services:
 
 ## 📊 What Gets Preserved
 
-To keep memory usage predictable for large workbooks, split output focuses on content:
+### In `xlsx` output mode (default)
 
-✅ **Data & Content**
+✅ **Preserved structure/content**
 - Cell values
 - Formulas
 - Sheet names
+- Merged-cell ranges
+- Column widths
+- Row heights
+- Freeze panes and auto-filter refs
 
-⚠️ **Not Preserved**
-- Cell styles and formatting
-- Column widths and row heights
-- Merged-cell structure
+⚠️ **Not preserved**
+- Cell style formatting (font/fill/border/alignment)
+
+### In `txt` output mode (`?format=txt`)
+
+✅ **Preserved**
+- Row/column grid layout as tab-separated rows
+- Sheet values/formulas as text
+- Structural metadata headers (`sheet_name`, `max_row`, `max_col`, `merged_ranges`)
+
+⚠️ **Not preserved**
+- Native Excel visual/layout features (styles, freeze panes, filters, widths/heights)
 
 ## 🔍 Error Handling
 
@@ -248,7 +266,7 @@ Error responses include clear messages:
 
 Split files are named using the pattern:
 ```
-{original_filename}_{sheet_name}.xlsx
+{original_filename}_{sheet_name}.{xlsx|txt}
 ```
 
 For example:
