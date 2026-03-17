@@ -4,10 +4,11 @@ A production-ready Flask web service that splits multi-sheet Excel files into in
 
 ## 🚀 Features
 
-- **Sheet Separation**: Automatically splits Excel files with multiple sheets into individual `.xlsx` files
-- **Smart Response**: Returns a single `.xlsx` file for single-sheet workbooks, or a `.zip` file for multiple sheets
-- **Format Preservation**: Maintains cell values, formulas, merged cells, column widths, row heights, and basic formatting
-- **Memory Efficient**: Processes files entirely in memory without temporary file storage
+- **Sheet Separation**: Automatically splits Excel files with multiple sheets into individual files per sheet
+- **Smart Response**: Returns a single file for one visible sheet, or a `.zip` for multiple sheets
+- **Structure Preservation (XLSX mode)**: Keeps merged ranges, row heights, column widths, sheet names, and formulas (without style formatting)
+- **Optional TXT Output**: Export each sheet as tab-separated `.txt` while retaining grid layout and metadata
+- **Memory Conscious**: Uses temporary files during processing to reduce peak memory pressure
 - **Production Ready**: Includes health checks, comprehensive error handling, and detailed logging
 - **Docker Support**: Fully containerized with Gunicorn for production deployment
 
@@ -56,7 +57,13 @@ docker build -t excel-splitter .
 
 2. Run the container:
 ```bash
-docker run -p 3070:3070 -e MAX_FILE_SIZE_MB=100 excel-splitter
+docker run -p 3070:3070 \
+  -e MAX_FILE_SIZE_MB=100 \
+  -e GUNICORN_WORKERS=1 \
+  -e GUNICORN_TIMEOUT=1800 \
+  -e GUNICORN_MAX_REQUESTS=25 \
+  -e GUNICORN_MAX_REQUESTS_JITTER=10 \
+  excel-splitter
 ```
 
 ## 📡 API Endpoints
@@ -68,14 +75,18 @@ Upload an Excel file to split into individual sheets.
 - Method: `POST`
 - Content-Type: `multipart/form-data`
 - Field name: `file`
+- Optional query/form parameter: `format` (`xlsx` default, `txt` optional)
 
 **Response:**
-- Single sheet: Returns `.xlsx` file directly
-- Multiple sheets: Returns `.zip` file containing all split files
+- Single sheet: Returns `.xlsx` or `.txt` directly (based on `format`)
+- Multiple sheets: Returns `.zip` containing one file per sheet
 
 **Example using curl:**
 ```bash
 curl -X POST -F "file=@your-excel-file.xlsx" http://localhost:3070/split-excel -o output.zip
+
+# Optional TXT mode
+curl -X POST -F "file=@your-excel-file.xlsx" "http://localhost:3070/split-excel?format=txt" -o output.zip
 ```
 
 **Example using Python:**
@@ -110,19 +121,19 @@ Service information and configuration details.
 ```json
 {
   "service": "Excel File Splitter",
-  "version": "2.1.0",
-  "description": "Split Excel files by sheets while preserving data and structure",
+  "version": "2.2.0",
+  "description": "Split Excel files by visible sheets while preserving structure",
   "features": [
+    "Sheet structure preservation (no cell styling)",
+    "Skips hidden sheets",
     "Preserves cell values and formulas",
-    "Maintains merged cells",
-    "Keeps column widths and row heights",
-    "Preserves basic cell formatting",
-    "Maintains number formats"
+    "Single-sheet direct response or multi-sheet ZIP"
   ],
   "configuration": {
     "max_file_size": "50.0 MB",
     "max_sheets": 100,
-    "allowed_extensions": ["xlsx", "xls", "xlsm", "xlsb"]
+    "allowed_extensions": ["xlsx", "xls", "xlsm", "xlsb"],
+    "output_formats": ["xlsx", "txt"]
   }
 }
 ```
@@ -136,6 +147,12 @@ Configure the service using environment variables:
 | `PORT` | Port to run the service on | `3070` |
 | `MAX_FILE_SIZE_MB` | Maximum file size in megabytes | `50` |
 | `MAX_SHEETS` | Maximum number of sheets to process | `100` |
+| `GUNICORN_WORKERS` | Number of Gunicorn worker processes | `1` |
+| `GUNICORN_TIMEOUT` | Worker timeout in seconds for long sheet processing | `1800` |
+| `GUNICORN_GRACEFUL_TIMEOUT` | Graceful shutdown timeout in seconds | `1800` |
+| `GUNICORN_MAX_REQUESTS` | Restart worker after N requests (helps cap memory growth) | `25` |
+| `GUNICORN_MAX_REQUESTS_JITTER` | Randomized spread for worker restarts | `10` |
+| `ZIP_COMPRESSION_LEVEL` | ZIP compression level (0-9, lower is faster, applies to XLSX bundles) | `1` |
 
 ### Example Configuration:
 ```bash
@@ -159,7 +176,12 @@ COPY app.py .
 
 EXPOSE 3070
 
-CMD ["gunicorn", "--bind", "0.0.0.0:3070", "--workers", "4", "--timeout", "120", "app:app"]
+ENV GUNICORN_WORKERS=1
+ENV GUNICORN_TIMEOUT=1800
+ENV GUNICORN_GRACEFUL_TIMEOUT=1800
+ENV GUNICORN_MAX_REQUESTS=25
+ENV GUNICORN_MAX_REQUESTS_JITTER=10
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} app:app"]
 ```
 
 ### Docker Compose
@@ -175,6 +197,8 @@ services:
       - MAX_FILE_SIZE_MB=100
       - MAX_SHEETS=100
       - PORT=3070
+      - GUNICORN_WORKERS=1
+      - GUNICORN_TIMEOUT=1800
     restart: unless-stopped
 ```
 
@@ -203,24 +227,29 @@ services:
 
 ## 📊 What Gets Preserved
 
-When splitting Excel files, the service maintains:
+### In `xlsx` output mode (default)
 
-✅ **Data & Content**
+✅ **Preserved structure/content**
 - Cell values
 - Formulas
-- Number formats (dates, currency, percentages)
-
-✅ **Structure**
-- Merged cells
+- Sheet names
+- Merged-cell ranges
 - Column widths
 - Row heights
-- Sheet names
+- Freeze panes and auto-filter refs
 
-✅ **Basic Formatting**
-- Font styles and sizes
-- Cell colors and fills
-- Borders
-- Text alignment
+⚠️ **Not preserved**
+- Cell style formatting (font/fill/border/alignment)
+
+### In `txt` output mode (`?format=txt`)
+
+✅ **Preserved**
+- Row/column grid layout as tab-separated rows
+- Sheet values/formulas as text
+- Structural metadata headers (`sheet_name`, `max_row`, `max_col`, `merged_ranges`)
+
+⚠️ **Not preserved**
+- Native Excel visual/layout features (styles, freeze panes, filters, widths/heights)
 
 ## 🔍 Error Handling
 
@@ -243,7 +272,7 @@ Error responses include clear messages:
 
 Split files are named using the pattern:
 ```
-{original_filename}_{sheet_name}.xlsx
+{original_filename}_{sheet_name}.{xlsx|txt}
 ```
 
 For example:
