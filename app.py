@@ -26,6 +26,7 @@ MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", 50))
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_SHEETS = int(os.environ.get("MAX_SHEETS", 100))
 ALLOWED_EXTENSIONS = {"xlsx", "xls", "xlsm", "xlsb"}
+ZIP_COMPRESSION_LEVEL = max(0, min(9, int(os.environ.get("ZIP_COMPRESSION_LEVEL", 1))))
 PORT = int(os.environ.get("PORT", 3070))
 
 app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
@@ -92,10 +93,14 @@ def _write_sheet_as_workbook(source_ws, sheet_name: str, output_path: str) -> No
         for merged_range in source_ws.merged_cells.ranges:
             target_ws.merge_cells(str(merged_range))
 
-        for row in source_ws.iter_rows():
-            for cell in row:
-                if cell.value is not None:
-                    target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+        # Copy only populated cells to avoid scanning huge empty grids.
+        for source_cell in source_ws._cells.values():
+            if source_cell.value is not None:
+                target_ws.cell(
+                    row=source_cell.row,
+                    column=source_cell.column,
+                    value=source_cell.value,
+                )
 
         output_wb.save(output_path)
     finally:
@@ -204,8 +209,6 @@ def split_excel_by_sheets_simple(
             except Exception as e:
                 logger.error("Error processing sheet '%s': %s", sheet_name, e)
                 continue
-            finally:
-                gc.collect()
 
         if not generated_paths:
             return None, None, None, "No sheets could be processed successfully"
@@ -225,7 +228,12 @@ def split_excel_by_sheets_simple(
             )
 
         zip_path = os.path.join(temp_dir, f"{base_name}_split.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zip_file:
+        with zipfile.ZipFile(
+            zip_path,
+            "w",
+            zipfile.ZIP_DEFLATED,
+            compresslevel=ZIP_COMPRESSION_LEVEL,
+        ) as zip_file:
             for generated_path in generated_paths:
                 zip_file.write(generated_path, arcname=os.path.basename(generated_path))
                 try:

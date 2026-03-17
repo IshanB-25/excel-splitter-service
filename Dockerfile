@@ -30,9 +30,10 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Gunicorn defaults tuned for memory-heavy workbook processing.
 ENV GUNICORN_WORKERS=1
-ENV GUNICORN_TIMEOUT=600
+ENV GUNICORN_TIMEOUT=1800
+ENV GUNICORN_GRACEFUL_TIMEOUT=1800
 ENV GUNICORN_MAX_REQUESTS=25
 ENV GUNICORN_MAX_REQUESTS_JITTER=10
 
 # Run with gunicorn for production.
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} --worker-class sync --access-logfile - --error-logfile - app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} --worker-class sync --access-logfile - --error-logfile - app:app"]

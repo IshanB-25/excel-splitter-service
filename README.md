@@ -60,6 +60,7 @@ docker build -t excel-splitter .
 docker run -p 3070:3070 \
   -e MAX_FILE_SIZE_MB=100 \
   -e GUNICORN_WORKERS=1 \
+  -e GUNICORN_TIMEOUT=1800 \
   -e GUNICORN_MAX_REQUESTS=25 \
   -e GUNICORN_MAX_REQUESTS_JITTER=10 \
   excel-splitter
@@ -147,9 +148,11 @@ Configure the service using environment variables:
 | `MAX_FILE_SIZE_MB` | Maximum file size in megabytes | `50` |
 | `MAX_SHEETS` | Maximum number of sheets to process | `100` |
 | `GUNICORN_WORKERS` | Number of Gunicorn worker processes | `1` |
-| `GUNICORN_TIMEOUT` | Request timeout in seconds | `600` |
+| `GUNICORN_TIMEOUT` | Worker timeout in seconds for long sheet processing | `1800` |
+| `GUNICORN_GRACEFUL_TIMEOUT` | Graceful shutdown timeout in seconds | `1800` |
 | `GUNICORN_MAX_REQUESTS` | Restart worker after N requests (helps cap memory growth) | `25` |
 | `GUNICORN_MAX_REQUESTS_JITTER` | Randomized spread for worker restarts | `10` |
+| `ZIP_COMPRESSION_LEVEL` | ZIP compression level (0-9, lower is faster) | `1` |
 
 ### Example Configuration:
 ```bash
@@ -174,10 +177,11 @@ COPY app.py .
 EXPOSE 3070
 
 ENV GUNICORN_WORKERS=1
-ENV GUNICORN_TIMEOUT=600
+ENV GUNICORN_TIMEOUT=1800
+ENV GUNICORN_GRACEFUL_TIMEOUT=1800
 ENV GUNICORN_MAX_REQUESTS=25
 ENV GUNICORN_MAX_REQUESTS_JITTER=10
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --graceful-timeout ${GUNICORN_GRACEFUL_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} app:app"]
 ```
 
 ### Docker Compose
@@ -193,6 +197,8 @@ services:
       - MAX_FILE_SIZE_MB=100
       - MAX_SHEETS=100
       - PORT=3070
+      - GUNICORN_WORKERS=1
+      - GUNICORN_TIMEOUT=1800
     restart: unless-stopped
 ```
 
