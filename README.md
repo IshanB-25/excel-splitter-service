@@ -152,7 +152,7 @@ Configure the service using environment variables:
 | `GUNICORN_GRACEFUL_TIMEOUT` | Graceful shutdown timeout in seconds | `1800` |
 | `GUNICORN_MAX_REQUESTS` | Restart worker after N requests (helps cap memory growth) | `25` |
 | `GUNICORN_MAX_REQUESTS_JITTER` | Randomized spread for worker restarts | `10` |
-| `ZIP_COMPRESSION_LEVEL` | ZIP compression level (0-9, lower is faster) | `1` |
+| `ZIP_COMPRESSION_LEVEL` | ZIP compression level (0-9, lower is faster, applies to XLSX bundles) | `1` |
 
 ### Example Configuration:
 ```bash

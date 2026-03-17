@@ -118,7 +118,9 @@ def _write_sheet_as_txt(source_ws, sheet_name: str, output_path: str) -> None:
     """
     max_row = source_ws.max_row or 0
     max_col = source_ws.max_column or 0
-    merged_ranges = ",".join(str(r) for r in source_ws.merged_cells.ranges)
+    merged_ranges = ""
+    if hasattr(source_ws, "merged_cells"):
+        merged_ranges = ",".join(str(r) for r in source_ws.merged_cells.ranges)
 
     with open(output_path, "w", encoding="utf-8", newline="") as txt_file:
         txt_file.write(f"# sheet_name\t{sheet_name}\n")
@@ -132,15 +134,8 @@ def _write_sheet_as_txt(source_ws, sheet_name: str, output_path: str) -> None:
             lineterminator="\n",
             quoting=csv.QUOTE_MINIMAL,
         )
-        if max_row > 0 and max_col > 0:
-            for row in source_ws.iter_rows(
-                min_row=1,
-                max_row=max_row,
-                min_col=1,
-                max_col=max_col,
-                values_only=True,
-            ):
-                writer.writerow(["" if value is None else value for value in row])
+        for row in source_ws.iter_rows(values_only=True):
+            writer.writerow(["" if value is None else value for value in row])
 
 
 @timing_decorator
@@ -160,10 +155,11 @@ def split_excel_by_sheets_simple(
     source_wb = None
     try:
         uploaded_stream.seek(0)
+        read_only_mode = output_format == "txt"
         try:
             source_wb = load_workbook(
                 uploaded_stream,
-                read_only=False,
+                read_only=read_only_mode,
                 data_only=False,
                 keep_links=False,
             )
@@ -228,12 +224,16 @@ def split_excel_by_sheets_simple(
             )
 
         zip_path = os.path.join(temp_dir, f"{base_name}_split.zip")
-        with zipfile.ZipFile(
-            zip_path,
-            "w",
-            zipfile.ZIP_DEFLATED,
-            compresslevel=ZIP_COMPRESSION_LEVEL,
-        ) as zip_file:
+        zip_compression = (
+            zipfile.ZIP_STORED
+            if output_format == "txt" or ZIP_COMPRESSION_LEVEL == 0
+            else zipfile.ZIP_DEFLATED
+        )
+        zip_kwargs = {}
+        if zip_compression == zipfile.ZIP_DEFLATED:
+            zip_kwargs["compresslevel"] = ZIP_COMPRESSION_LEVEL
+
+        with zipfile.ZipFile(zip_path, "w", zip_compression, **zip_kwargs) as zip_file:
             for generated_path in generated_paths:
                 zip_file.write(generated_path, arcname=os.path.basename(generated_path))
                 try:
