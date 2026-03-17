@@ -6,7 +6,7 @@ A production-ready Flask web service that splits multi-sheet Excel files into in
 
 - **Sheet Separation**: Automatically splits Excel files with multiple sheets into individual `.xlsx` files
 - **Smart Response**: Returns a single `.xlsx` file for single-sheet workbooks, or a `.zip` file for multiple sheets
-- **Format Preservation**: Maintains cell values, formulas, merged cells, column widths, row heights, and basic formatting
+- **Low-Memory Splitting**: Streams sheet data with minimal RAM overhead per request
 - **Memory Efficient**: Processes files entirely in memory without temporary file storage
 - **Production Ready**: Includes health checks, comprehensive error handling, and detailed logging
 - **Docker Support**: Fully containerized with Gunicorn for production deployment
@@ -118,11 +118,10 @@ Service information and configuration details.
   "version": "2.1.0",
   "description": "Split Excel files by sheets while preserving data and structure",
   "features": [
+    "Low-memory sheet splitting",
+    "Skips hidden sheets",
     "Preserves cell values and formulas",
-    "Maintains merged cells",
-    "Keeps column widths and row heights",
-    "Preserves basic cell formatting",
-    "Maintains number formats"
+    "Single-sheet direct response or multi-sheet ZIP"
   ],
   "configuration": {
     "max_file_size": "50.0 MB",
@@ -142,7 +141,7 @@ Configure the service using environment variables:
 | `MAX_FILE_SIZE_MB` | Maximum file size in megabytes | `50` |
 | `MAX_SHEETS` | Maximum number of sheets to process | `100` |
 | `GUNICORN_WORKERS` | Number of Gunicorn worker processes | `1` |
-| `GUNICORN_TIMEOUT` | Request timeout in seconds | `120` |
+| `GUNICORN_TIMEOUT` | Request timeout in seconds | `600` |
 | `GUNICORN_MAX_REQUESTS` | Restart worker after N requests (helps cap memory growth) | `25` |
 | `GUNICORN_MAX_REQUESTS_JITTER` | Randomized spread for worker restarts | `10` |
 
@@ -169,7 +168,7 @@ COPY app.py .
 EXPOSE 3070
 
 ENV GUNICORN_WORKERS=1
-ENV GUNICORN_TIMEOUT=120
+ENV GUNICORN_TIMEOUT=600
 ENV GUNICORN_MAX_REQUESTS=25
 ENV GUNICORN_MAX_REQUESTS_JITTER=10
 CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} app:app"]
@@ -216,24 +215,17 @@ services:
 
 ## 📊 What Gets Preserved
 
-When splitting Excel files, the service maintains:
+To keep memory usage predictable for large workbooks, split output focuses on content:
 
 ✅ **Data & Content**
 - Cell values
 - Formulas
-- Number formats (dates, currency, percentages)
-
-✅ **Structure**
-- Merged cells
-- Column widths
-- Row heights
 - Sheet names
 
-✅ **Basic Formatting**
-- Font styles and sizes
-- Cell colors and fills
-- Borders
-- Text alignment
+⚠️ **Not Preserved**
+- Cell styles and formatting
+- Column widths and row heights
+- Merged-cell structure
 
 ## 🔍 Error Handling
 

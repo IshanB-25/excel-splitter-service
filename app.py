@@ -1,244 +1,172 @@
-import os
-import io
-import re
-import zipfile
-import logging
 import gc
-from datetime import datetime
-from typing import Tuple, Optional
-from functools import wraps
+import logging
+import os
+import re
+import tempfile
 import time
+import zipfile
+from datetime import datetime
+from functools import wraps
+from typing import Optional, Tuple
 
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, after_this_request, jsonify, request, send_file
+from openpyxl import Workbook, load_workbook
 from werkzeug.exceptions import RequestEntityTooLarge
-from openpyxl import load_workbook, Workbook
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
 app = Flask(__name__)
 
-# Configuration
-MAX_FILE_SIZE_MB = int(os.environ.get('MAX_FILE_SIZE_MB', 50))  # Size in MB (default 50MB)
-MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
-MAX_SHEETS = int(os.environ.get('MAX_SHEETS', 100))  # Maximum number of sheets to process
-ALLOWED_EXTENSIONS = {'xlsx', 'xls', 'xlsm', 'xlsb'}
-PORT = int(os.environ.get('PORT', 3070))
+MAX_FILE_SIZE_MB = int(os.environ.get("MAX_FILE_SIZE_MB", 50))
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_SHEETS = int(os.environ.get("MAX_SHEETS", 100))
+ALLOWED_EXTENSIONS = {"xlsx", "xls", "xlsm", "xlsb"}
+PORT = int(os.environ.get("PORT", 3070))
 
-app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
+app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 
 
 def timing_decorator(f):
     """Decorator to measure and log function execution time."""
+
     @wraps(f)
     def wrapper(*args, **kwargs):
         start = time.time()
         result = f(*args, **kwargs)
         duration = time.time() - start
-        logger.info(f"{f.__name__} took {duration:.2f} seconds")
+        logger.info("%s took %.2f seconds", f.__name__, duration)
         return result
+
     return wrapper
 
 
 def sanitize_filename(filename: str) -> str:
-    """
-    Sanitize filename for safe file system usage.
-    
-    Args:
-        filename: Original filename
-        
-    Returns:
-        Sanitized filename safe for file systems
-    """
-    # Remove invalid characters for filenames
-    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    # Remove leading/trailing spaces and dots
-    sanitized = sanitized.strip('. ')
-    # Limit length to prevent filesystem issues
-    max_length = 100
-    if len(sanitized) > max_length:
+    """Sanitize filename for safe file system usage."""
+    sanitized = re.sub(r'[<>:"/\\|?*]', "_", filename).strip(". ")
+    if len(sanitized) > 100:
         name, ext = os.path.splitext(sanitized)
-        sanitized = name[:max_length - len(ext)] + ext
-    # Ensure non-empty filename
-    if not sanitized:
-        sanitized = 'unnamed'
-    return sanitized
+        sanitized = name[: 100 - len(ext)] + ext
+    return sanitized or "unnamed"
 
 
 def allowed_file(filename: str) -> bool:
-    """
-    Check if file has an allowed extension.
-    
-    Args:
-        filename: Name of the file to check
-        
-    Returns:
-        True if file extension is allowed, False otherwise
-    """
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    """Check if file has an allowed extension."""
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def _build_sheet_file(source_ws, sheet_name: str) -> bytes:
+def _write_sheet_as_workbook(source_ws, sheet_name: str, output_path: str) -> None:
     """
-    Build a single-sheet Excel file from a source worksheet.
-    
-    Returns:
-        XLSX file bytes for the sheet.
+    Write one worksheet into a new workbook.
+
+    This intentionally copies only cell values/formulas for speed and low memory.
     """
-    new_wb = Workbook()
-    output_buffer = io.BytesIO()
+    output_wb = Workbook(write_only=True)
     try:
-        # Remove default sheet and create new one with same name
-        new_wb.remove(new_wb.active)
-        target_ws = new_wb.create_sheet(title=sheet_name)
-        
-        # Copy column widths
-        for col_letter, col_dim in source_ws.column_dimensions.items():
-            if col_dim.width:
-                target_ws.column_dimensions[col_letter].width = col_dim.width
-        
-        # Copy row heights
-        for row_num, row_dim in source_ws.row_dimensions.items():
-            if row_dim.height:
-                target_ws.row_dimensions[row_num].height = row_dim.height
-        
-        # Copy all cells with values and basic formatting
-        for row in source_ws.iter_rows():
-            for cell in row:
-                target_cell = target_ws.cell(row=cell.row, column=cell.column)
-                
-                # Copy value
-                target_cell.value = cell.value
-                
-                # Copy basic formatting
-                if cell.has_style:
-                    try:
-                        target_cell.font = cell.font.copy()
-                        target_cell.fill = cell.fill.copy()
-                        target_cell.border = cell.border.copy()
-                        target_cell.alignment = cell.alignment.copy()
-                        target_cell.number_format = cell.number_format
-                    except Exception as e:
-                        logger.debug(f"Could not copy cell style: {e}")
-        
-        # Copy merged cells
-        for merged_range in source_ws.merged_cells.ranges:
-            target_ws.merge_cells(str(merged_range))
-        
-        # Save to bytes
-        new_wb.save(output_buffer)
-        return output_buffer.getvalue()
+        target_ws = output_wb.create_sheet(title=sheet_name)
+        for row in source_ws.iter_rows(values_only=True):
+            target_ws.append(row)
+        output_wb.save(output_path)
     finally:
         try:
-            new_wb.close()
+            output_wb.close()
         except Exception:
             pass
-        output_buffer.close()
 
 
 @timing_decorator
 def split_excel_by_sheets_simple(
-    file_bytes: bytes, 
-    original_filename: str
-) -> Tuple[Optional[bytes], Optional[str], Optional[str], Optional[str]]:
+    uploaded_stream,
+    original_filename: str,
+    temp_dir: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     """
-    Split an Excel file into separate files for each sheet.
-    Preserves data, formulas, merged cells, and basic structure.
-    
-    Args:
-        file_bytes: Raw bytes of the Excel file
-        original_filename: Original name of the uploaded file
-        
+    Split workbook into one workbook per visible sheet.
+
     Returns:
-        Tuple of (response_bytes, mime_type, download_name, error_message)
+        Tuple of (response_path, mime_type, download_name, error_message)
     """
     base_name = os.path.splitext(original_filename)[0]
     source_wb = None
-    
     try:
-        # Load the workbook
-        with io.BytesIO(file_bytes) as input_buffer:
+        uploaded_stream.seek(0)
+        try:
+            source_wb = load_workbook(
+                uploaded_stream,
+                read_only=True,
+                data_only=False,
+                keep_links=False,
+            )
+        except Exception as e:
+            logger.warning("Excel validation failed: %s", e)
+            return None, None, None, f"Invalid Excel file: {e}"
+
+        if len(source_wb.sheetnames) > MAX_SHEETS:
+            return (
+                None,
+                None,
+                None,
+                f"File contains too many sheets ({len(source_wb.sheetnames)}). Maximum allowed: {MAX_SHEETS}",
+            )
+
+        visible_sheets = []
+        hidden_sheets = []
+        for sheet_name in source_wb.sheetnames:
+            sheet = source_wb[sheet_name]
+            if sheet.sheet_state == "visible":
+                visible_sheets.append(sheet_name)
+            else:
+                hidden_sheets.append(sheet_name)
+
+        logger.info("Processing %s visible sheets from %s", len(visible_sheets), original_filename)
+        if hidden_sheets:
+            logger.info("Skipping %s hidden sheets", len(hidden_sheets))
+        if not visible_sheets:
+            return None, None, None, "No visible sheets found in workbook"
+
+        generated_paths = []
+        for sheet_name in visible_sheets:
             try:
-                source_wb = load_workbook(
-                    input_buffer,
-                    read_only=False,
-                    keep_vba=False,
-                    data_only=False,
-                    keep_links=True
-                )
-            except Exception as e:
-                logger.warning(f"Excel validation failed: {str(e)}")
-                return None, None, None, f"Invalid Excel file: {str(e)}"
-            
-            # Check sheet count
-            if len(source_wb.sheetnames) > MAX_SHEETS:
-                return None, None, None, f"File contains too many sheets ({len(source_wb.sheetnames)}). Maximum allowed: {MAX_SHEETS}"
-            
-            # Filter out hidden sheets
-            visible_sheets = []
-            hidden_sheets = []
-            for sheet_name in source_wb.sheetnames:
-                sheet = source_wb[sheet_name]
-                if sheet.sheet_state == 'visible':
-                    visible_sheets.append(sheet_name)
-                else:
-                    hidden_sheets.append(sheet_name)
-            
-            logger.info(f"Processing {len(visible_sheets)} visible sheets from {original_filename}")
-            if hidden_sheets:
-                logger.info(f"Skipping {len(hidden_sheets)} hidden sheets: {', '.join(hidden_sheets)}")
-            
-            if not visible_sheets:
-                return None, None, None, "No sheets could be processed successfully"
-            
-            if len(visible_sheets) == 1:
-                sheet_name = visible_sheets[0]
-                logger.info(f"Processing single visible sheet: {sheet_name}")
+                logger.info("Processing sheet: %s", sheet_name)
                 source_ws = source_wb[sheet_name]
-                file_payload = _build_sheet_file(source_ws, sheet_name)
                 output_filename = f"{base_name}_{sanitize_filename(sheet_name)}.xlsx"
-                return (
-                    file_payload,
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    output_filename,
-                    None
-                )
-            
-            # Multiple sheets: stream each sheet directly into the final ZIP payload.
-            with io.BytesIO() as zip_buffer:
-                processed_count = 0
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for sheet_name in visible_sheets:
-                        try:
-                            logger.info(f"Processing sheet: {sheet_name}")
-                            source_ws = source_wb[sheet_name]
-                            sheet_bytes = _build_sheet_file(source_ws, sheet_name)
-                            
-                            sanitized_sheet_name = sanitize_filename(sheet_name)
-                            output_filename = f"{base_name}_{sanitized_sheet_name}.xlsx"
-                            zip_file.writestr(output_filename, sheet_bytes)
-                            processed_count += 1
-                            logger.info(f"Successfully processed sheet: {sheet_name}")
-                        except Exception as e:
-                            logger.error(f"Error processing sheet '{sheet_name}': {str(e)}")
-                            # Continue processing other sheets even if one fails
-                            continue
-                
-                if processed_count == 0:
-                    return None, None, None, "No sheets could be processed successfully"
-                
-                zip_payload = zip_buffer.getvalue()
-            
-            return zip_payload, 'application/zip', f"{base_name}_split.zip", None
-        
+                output_path = os.path.join(temp_dir, output_filename)
+                _write_sheet_as_workbook(source_ws, sheet_name, output_path)
+                generated_paths.append(output_path)
+            except Exception as e:
+                logger.error("Error processing sheet '%s': %s", sheet_name, e)
+                continue
+            finally:
+                gc.collect()
+
+        if not generated_paths:
+            return None, None, None, "No sheets could be processed successfully"
+
+        if len(generated_paths) == 1:
+            one_file = generated_paths[0]
+            return (
+                one_file,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                os.path.basename(one_file),
+                None,
+            )
+
+        zip_path = os.path.join(temp_dir, f"{base_name}_split.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zip_file:
+            for generated_path in generated_paths:
+                zip_file.write(generated_path, arcname=os.path.basename(generated_path))
+                try:
+                    os.remove(generated_path)
+                except OSError:
+                    pass
+
+        return zip_path, "application/zip", os.path.basename(zip_path), None
     except Exception as e:
-        logger.error(f"Error splitting Excel file: {str(e)}")
-        return None, None, None, f"Error processing Excel file: {str(e)}"
+        logger.error("Error splitting Excel file: %s", e, exc_info=True)
+        return None, None, None, f"Error processing Excel file: {e}"
     finally:
         if source_wb is not None:
             try:
@@ -247,140 +175,140 @@ def split_excel_by_sheets_simple(
                 pass
 
 
-@app.route('/', methods=['GET'])
+@app.route("/", methods=["GET"])
 def index():
     """Service information endpoint."""
-    return jsonify({
-        'service': 'Excel File Splitter',
-        'version': '2.1.0',
-        'description': 'Split Excel files by sheets while preserving data and structure',
-        'endpoints': {
-            'POST /split-excel': 'Upload Excel file to split',
-            'GET /health': 'Health check endpoint',
-            'GET /': 'Service information'
-        },
-        'features': [
-            'Preserves cell values and formulas',
-            'Maintains merged cells',
-            'Keeps column widths and row heights',
-            'Preserves basic cell formatting',
-            'Maintains number formats'
-        ],
-        'configuration': {
-            'max_file_size': f"{MAX_FILE_SIZE / (1024*1024):.1f} MB",
-            'max_sheets': MAX_SHEETS,
-            'allowed_extensions': list(ALLOWED_EXTENSIONS)
-        },
-        'timestamp': datetime.utcnow().isoformat()
-    })
+    return jsonify(
+        {
+            "service": "Excel File Splitter",
+            "version": "2.2.0",
+            "description": "Split Excel files by visible sheets with low-memory processing",
+            "endpoints": {
+                "POST /split-excel": "Upload Excel file to split",
+                "GET /health": "Health check endpoint",
+                "GET /": "Service information",
+            },
+            "features": [
+                "Low-memory sheet splitting",
+                "Skips hidden sheets",
+                "Preserves cell values and formulas",
+                "Single-sheet direct response or multi-sheet ZIP",
+            ],
+            "configuration": {
+                "max_file_size": f"{MAX_FILE_SIZE / (1024 * 1024):.1f} MB",
+                "max_sheets": MAX_SHEETS,
+                "allowed_extensions": list(ALLOWED_EXTENSIONS),
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    )
 
 
-@app.route('/health', methods=['GET'])
+@app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint for monitoring."""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
-        'service': 'excel-splitter'
-    }), 200
+    return (
+        jsonify(
+            {
+                "status": "healthy",
+                "timestamp": datetime.utcnow().isoformat(),
+                "service": "excel-splitter",
+            }
+        ),
+        200,
+    )
 
 
-@app.route('/split-excel', methods=['POST'])
+@app.route("/split-excel", methods=["POST"])
 def split_excel():
-    """
-    Main endpoint to split Excel files by sheets.
-    
-    Accepts: multipart/form-data with 'file' field
-    Returns: 
-        - Single sheet: Direct Excel file
-        - Multiple sheets: ZIP file containing all sheets
-    """
+    """Split an uploaded workbook by visible sheets."""
     file = None
-    file_bytes = None
+    temp_dir_ctx = None
+    cleanup_registered = False
     try:
-        # Validate request has file
-        if 'file' not in request.files:
+        if "file" not in request.files:
             logger.warning("No file in request")
-            return jsonify({'error': 'No file provided'}), 400
-        
-        file = request.files['file']
-        
-        # Validate file selection
-        if file.filename == '':
+            return jsonify({"error": "No file provided"}), 400
+
+        file = request.files["file"]
+        if file.filename == "":
             logger.warning("Empty filename")
-            return jsonify({'error': 'No file selected'}), 400
-        
-        # Validate file extension
+            return jsonify({"error": "No file selected"}), 400
+
         if not allowed_file(file.filename):
-            logger.warning(f"Invalid file extension: {file.filename}")
-            return jsonify({
-                'error': f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}'
-            }), 400
-        
-        # Read file bytes
-        file_bytes = file.read()
-        
-        # Log file info
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        logger.info(f"Received file: {file.filename} ({file_size_mb:.2f} MB)")
-        
-        # Split the Excel file
-        response_bytes, mime_type, download_name, error = split_excel_by_sheets_simple(
-            file_bytes, 
-            file.filename
+            logger.warning("Invalid file extension: %s", file.filename)
+            return (
+                jsonify({"error": f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}'}),
+                400,
+            )
+
+        file.seek(0, os.SEEK_END)
+        upload_size = file.tell()
+        file.seek(0)
+        logger.info("Received file: %s (%.2f MB)", file.filename, upload_size / (1024 * 1024))
+
+        temp_dir_ctx = tempfile.TemporaryDirectory(prefix="excel-split-")
+        response_path, mime_type, download_name, error = split_excel_by_sheets_simple(
+            file.stream,
+            file.filename,
+            temp_dir_ctx.name,
         )
-        
+
         if error:
-            logger.error(f"Splitting failed: {error}")
+            logger.error("Splitting failed: %s", error)
             status_code = 400 if error.startswith("Invalid Excel file") else 500
-            return jsonify({'error': error}), status_code
-        
-        if not response_bytes:
-            return jsonify({'error': 'No sheets found in Excel file'}), 400
-        
-        logger.info(f"Returning processed file: {download_name}")
-        return send_file(
-            io.BytesIO(response_bytes),
-            mimetype=mime_type,
-            as_attachment=True,
-            download_name=download_name
-        )
-            
+            return jsonify({"error": error}), status_code
+
+        if not response_path:
+            return jsonify({"error": "No sheets found in Excel file"}), 400
+
+        tmp_ref = temp_dir_ctx
+
+        @after_this_request
+        def _cleanup_temp_dir(response):
+            try:
+                tmp_ref.cleanup()
+            except Exception:
+                logger.warning("Could not cleanup temporary directory", exc_info=True)
+            return response
+
+        cleanup_registered = True
+        logger.info("Returning processed file: %s", download_name)
+        return send_file(response_path, mimetype=mime_type, as_attachment=True, download_name=download_name)
     except RequestEntityTooLarge:
-        logger.warning(f"File too large (max: {MAX_FILE_SIZE / (1024*1024):.1f} MB)")
-        return jsonify({
-            'error': f'File too large. Maximum size: {MAX_FILE_SIZE / (1024*1024):.1f} MB'
-        }), 413
+        logger.warning("File too large (max: %.1f MB)", MAX_FILE_SIZE / (1024 * 1024))
+        return jsonify({"error": f"File too large. Maximum size: {MAX_FILE_SIZE / (1024 * 1024):.1f} MB"}), 413
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
-        return jsonify({'error': 'An unexpected error occurred'}), 500
+        logger.error("Unexpected error: %s", e, exc_info=True)
+        return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if file is not None:
             try:
                 file.close()
             except Exception:
                 pass
-        if file_bytes is not None:
-            del file_bytes
+        if temp_dir_ctx is not None and not cleanup_registered:
+            try:
+                temp_dir_ctx.cleanup()
+            except Exception:
+                pass
         gc.collect()
 
 
 @app.errorhandler(413)
-def request_entity_too_large(e):
+def request_entity_too_large(_):
     """Handle file size limit exceeded."""
-    return jsonify({
-        'error': f'File too large. Maximum size: {MAX_FILE_SIZE / (1024*1024):.1f} MB'
-    }), 413
+    return jsonify({"error": f"File too large. Maximum size: {MAX_FILE_SIZE / (1024 * 1024):.1f} MB"}), 413
 
 
 @app.errorhandler(500)
 def internal_server_error(e):
     """Handle internal server errors."""
-    logger.error(f"Internal server error: {str(e)}", exc_info=True)
-    return jsonify({'error': 'Internal server error'}), 500
+    logger.error("Internal server error: %s", e, exc_info=True)
+    return jsonify({"error": "Internal server error"}), 500
 
 
-if __name__ == '__main__':
-    logger.info(f"Starting Excel Splitter Service on port {PORT}")
-    logger.info(f"Configuration: MAX_FILE_SIZE={MAX_FILE_SIZE_MB}MB, MAX_SHEETS={MAX_SHEETS}")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+if __name__ == "__main__":
+    logger.info("Starting Excel Splitter Service on port %s", PORT)
+    logger.info("Configuration: MAX_FILE_SIZE=%sMB, MAX_SHEETS=%s", MAX_FILE_SIZE_MB, MAX_SHEETS)
+    app.run(host="0.0.0.0", port=PORT, debug=False)
