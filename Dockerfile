@@ -26,7 +26,13 @@ EXPOSE 3070
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:3070/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:3070/health', timeout=2)" || exit 1
 
-# Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:3070", "--workers", "4", "--timeout", "120", "--worker-class", "sync", "--access-logfile", "-", "--error-logfile", "-", "app:app"]
+# Gunicorn defaults tuned for memory-heavy workbook processing.
+ENV GUNICORN_WORKERS=1
+ENV GUNICORN_TIMEOUT=120
+ENV GUNICORN_MAX_REQUESTS=25
+ENV GUNICORN_MAX_REQUESTS_JITTER=10
+
+# Run with gunicorn for production.
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:3070 --workers ${GUNICORN_WORKERS} --timeout ${GUNICORN_TIMEOUT} --max-requests ${GUNICORN_MAX_REQUESTS} --max-requests-jitter ${GUNICORN_MAX_REQUESTS_JITTER} --worker-class sync --access-logfile - --error-logfile - app:app"]
