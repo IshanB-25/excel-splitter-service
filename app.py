@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 import zipfile
+import zlib
 from datetime import datetime
 from functools import wraps
 from typing import Optional, Tuple
@@ -141,7 +142,24 @@ def _write_sheet_as_txt(source_ws, sheet_name: str, output_path: str) -> None:
 
 def _row_to_content_string(row_values) -> str:
     """Convert row tuple to tab-separated text content."""
-    return "\t".join("" if value is None else str(value) for value in row_values)
+    row_list = list(row_values)
+    while row_list and row_list[-1] in (None, ""):
+        row_list.pop()
+    return "\t".join("" if value is None else str(value) for value in row_list)
+
+
+def _gzip_text_stream(text_iterable):
+    """Gzip-compress a streamed text iterator into bytes."""
+    compressor = zlib.compressobj(wbits=16 + zlib.MAX_WBITS)
+    for chunk in text_iterable:
+        if not chunk:
+            continue
+        compressed = compressor.compress(chunk.encode("utf-8"))
+        if compressed:
+            yield compressed
+    tail = compressor.flush()
+    if tail:
+        yield tail
 
 
 @timing_decorator
@@ -401,7 +419,7 @@ def split_excel_ndjson():
     Stream workbook content as NDJSON with one row object per line.
 
     Output line schema:
-    {"name": "<sheet_name>", "row": <row_number>, "content": "<tab-separated row text>"}
+    {"name": "<sheet_name>", "content": "<tab-separated row text>"}
     """
     file = None
     upload_path = None
@@ -440,7 +458,7 @@ def split_excel_ndjson():
         base_name = os.path.splitext(file.filename)[0]
 
         @stream_with_context
-        def generate():
+        def generate_text():
             source_wb = None
             try:
                 source_wb = load_workbook(
@@ -469,13 +487,13 @@ def split_excel_ndjson():
 
                 for sheet_name in visible_sheets:
                     ws = source_wb[sheet_name]
-                    row_number = 0
                     for row in ws.iter_rows(values_only=True):
-                        row_number += 1
+                        # Skip rows that are fully empty.
+                        if not any(value not in (None, "") for value in row):
+                            continue
                         yield json.dumps(
                             {
                                 "name": sheet_name,
-                                "row": row_number,
                                 "content": _row_to_content_string(row),
                             },
                             ensure_ascii=False,
@@ -496,8 +514,14 @@ def split_excel_ndjson():
                         pass
                 gc.collect()
 
-        response = Response(generate(), mimetype="application/x-ndjson")
-        response.headers["Content-Disposition"] = f'attachment; filename="{base_name}_split.ndjson"'
+        gzip_enabled = (request.args.get("gzip", "true").strip().lower() != "false")
+        if gzip_enabled:
+            response = Response(_gzip_text_stream(generate_text()), mimetype="application/x-ndjson")
+            response.headers["Content-Encoding"] = "gzip"
+            response.headers["Content-Disposition"] = f'attachment; filename="{base_name}_split.ndjson.gz"'
+        else:
+            response = Response(generate_text(), mimetype="application/x-ndjson")
+            response.headers["Content-Disposition"] = f'attachment; filename="{base_name}_split.ndjson"'
         return response
     except RequestEntityTooLarge:
         return jsonify({"error": f"File too large. Maximum size: {MAX_FILE_SIZE / (1024 * 1024):.1f} MB"}), 413

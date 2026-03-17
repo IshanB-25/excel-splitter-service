@@ -112,16 +112,27 @@ Upload an Excel file and stream extracted sheet rows as NDJSON.
 
 **Response:**
 - Content-Type: `application/x-ndjson`
+- Default: gzip-compressed stream (`Content-Encoding: gzip`)
 - One JSON object per line:
 ```json
-{"name":"Sheet1","row":1,"content":"A\tB\tC"}
-{"name":"Sheet1","row":2,"content":"1\t2\t3"}
+{"name":"Sheet1","content":"A\tB\tC"}
+{"name":"Sheet1","content":"1\t2\t3"}
 ```
+
+Notes:
+- All visible sheets are streamed (no sheet filter).
+- Empty rows are skipped.
+- Disable gzip with `?gzip=false`.
 
 **Example using curl:**
 ```bash
 curl -X POST -F "file=@your-excel-file.xlsx" \
   http://localhost:3070/split-excel-ndjson \
+  -o output.ndjson.gz
+
+# Disable gzip if needed
+curl -X POST -F "file=@your-excel-file.xlsx" \
+  "http://localhost:3070/split-excel-ndjson?gzip=false" \
   -o output.ndjson
 ```
 
