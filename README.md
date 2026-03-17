@@ -102,6 +102,29 @@ if response.status_code == 200:
         output.write(response.content)
 ```
 
+### `POST /split-excel-ndjson`
+Upload an Excel file and stream extracted sheet rows as NDJSON.
+
+**Request:**
+- Method: `POST`
+- Content-Type: `multipart/form-data`
+- Field name: `file`
+
+**Response:**
+- Content-Type: `application/x-ndjson`
+- One JSON object per line:
+```json
+{"name":"Sheet1","row":1,"content":"A\tB\tC"}
+{"name":"Sheet1","row":2,"content":"1\t2\t3"}
+```
+
+**Example using curl:**
+```bash
+curl -X POST -F "file=@your-excel-file.xlsx" \
+  http://localhost:3070/split-excel-ndjson \
+  -o output.ndjson
+```
+
 ### `GET /health`
 Health check endpoint for monitoring.
 
@@ -127,13 +150,14 @@ Service information and configuration details.
     "Sheet structure preservation (no cell styling)",
     "Skips hidden sheets",
     "Preserves cell values and formulas",
-    "Single-sheet direct response or multi-sheet ZIP"
+    "Single-sheet direct response or multi-sheet ZIP",
+    "Streaming NDJSON endpoint for low-memory extraction"
   ],
   "configuration": {
     "max_file_size": "50.0 MB",
     "max_sheets": 100,
     "allowed_extensions": ["xlsx", "xls", "xlsm", "xlsb"],
-    "output_formats": ["xlsx", "txt"]
+    "output_formats": ["xlsx", "txt", "ndjson"]
   }
 }
 ```

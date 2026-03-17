@@ -1,5 +1,6 @@
 import gc
 import csv
+import json
 import logging
 import os
 import re
@@ -10,7 +11,7 @@ from datetime import datetime
 from functools import wraps
 from typing import Optional, Tuple
 
-from flask import Flask, after_this_request, jsonify, request, send_file
+from flask import Flask, Response, after_this_request, jsonify, request, send_file, stream_with_context
 from openpyxl import Workbook, load_workbook
 from werkzeug.exceptions import RequestEntityTooLarge
 
@@ -138,6 +139,11 @@ def _write_sheet_as_txt(source_ws, sheet_name: str, output_path: str) -> None:
             writer.writerow(["" if value is None else value for value in row])
 
 
+def _row_to_content_string(row_values) -> str:
+    """Convert row tuple to tab-separated text content."""
+    return "\t".join("" if value is None else str(value) for value in row_values)
+
+
 @timing_decorator
 def split_excel_by_sheets_simple(
     uploaded_stream,
@@ -263,6 +269,7 @@ def index():
             "description": "Split Excel files by visible sheets while preserving structure",
             "endpoints": {
                 "POST /split-excel": "Upload Excel file to split",
+                "POST /split-excel-ndjson": "Upload Excel and stream NDJSON rows",
                 "GET /health": "Health check endpoint",
                 "GET /": "Service information",
             },
@@ -276,7 +283,7 @@ def index():
                 "max_file_size": f"{MAX_FILE_SIZE / (1024 * 1024):.1f} MB",
                 "max_sheets": MAX_SHEETS,
                 "allowed_extensions": list(ALLOWED_EXTENSIONS),
-                "output_formats": ["xlsx", "txt"],
+                "output_formats": ["xlsx", "txt", "ndjson"],
             },
             "timestamp": datetime.utcnow().isoformat(),
         }
@@ -386,6 +393,123 @@ def split_excel():
             except Exception:
                 pass
         gc.collect()
+
+
+@app.route("/split-excel-ndjson", methods=["POST"])
+def split_excel_ndjson():
+    """
+    Stream workbook content as NDJSON with one row object per line.
+
+    Output line schema:
+    {"name": "<sheet_name>", "row": <row_number>, "content": "<tab-separated row text>"}
+    """
+    file = None
+    upload_path = None
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "No file selected"}), 400
+        if not allowed_file(file.filename):
+            return (
+                jsonify({"error": f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}'}),
+                400,
+            )
+
+        suffix = os.path.splitext(file.filename)[1] or ".xlsx"
+        with tempfile.NamedTemporaryFile(prefix="excel-upload-", suffix=suffix, delete=False) as tmp_file:
+            upload_path = tmp_file.name
+            total_bytes = 0
+            while True:
+                chunk = file.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MAX_FILE_SIZE:
+                    raise RequestEntityTooLarge()
+                tmp_file.write(chunk)
+
+        logger.info(
+            "Received file for ndjson: %s (%.2f MB)",
+            file.filename,
+            total_bytes / (1024 * 1024),
+        )
+
+        base_name = os.path.splitext(file.filename)[0]
+
+        @stream_with_context
+        def generate():
+            source_wb = None
+            try:
+                source_wb = load_workbook(
+                    upload_path,
+                    read_only=True,
+                    data_only=False,
+                    keep_links=False,
+                )
+                if len(source_wb.sheetnames) > MAX_SHEETS:
+                    yield json.dumps(
+                        {
+                            "error": f"File contains too many sheets ({len(source_wb.sheetnames)}). Maximum allowed: {MAX_SHEETS}"
+                        }
+                    ) + "\n"
+                    return
+
+                visible_sheets = []
+                for sheet_name in source_wb.sheetnames:
+                    sheet = source_wb[sheet_name]
+                    if sheet.sheet_state == "visible":
+                        visible_sheets.append(sheet_name)
+
+                if not visible_sheets:
+                    yield json.dumps({"error": "No visible sheets found in workbook"}) + "\n"
+                    return
+
+                for sheet_name in visible_sheets:
+                    ws = source_wb[sheet_name]
+                    row_number = 0
+                    for row in ws.iter_rows(values_only=True):
+                        row_number += 1
+                        yield json.dumps(
+                            {
+                                "name": sheet_name,
+                                "row": row_number,
+                                "content": _row_to_content_string(row),
+                            },
+                            ensure_ascii=False,
+                        ) + "\n"
+            except Exception as e:
+                logger.error("Error streaming NDJSON: %s", e, exc_info=True)
+                yield json.dumps({"error": f"Error processing Excel file: {e}"}) + "\n"
+            finally:
+                if source_wb is not None:
+                    try:
+                        source_wb.close()
+                    except Exception:
+                        pass
+                if upload_path and os.path.exists(upload_path):
+                    try:
+                        os.remove(upload_path)
+                    except OSError:
+                        pass
+                gc.collect()
+
+        response = Response(generate(), mimetype="application/x-ndjson")
+        response.headers["Content-Disposition"] = f'attachment; filename="{base_name}_split.ndjson"'
+        return response
+    except RequestEntityTooLarge:
+        return jsonify({"error": f"File too large. Maximum size: {MAX_FILE_SIZE / (1024 * 1024):.1f} MB"}), 413
+    except Exception as e:
+        logger.error("Unexpected error in ndjson endpoint: %s", e, exc_info=True)
+        return jsonify({"error": "An unexpected error occurred"}), 500
+    finally:
+        if file is not None:
+            try:
+                file.close()
+            except Exception:
+                pass
 
 
 @app.errorhandler(413)
